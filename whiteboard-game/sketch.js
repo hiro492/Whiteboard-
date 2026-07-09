@@ -1169,6 +1169,11 @@ function applyCanvasProjection() {
   gameCanvasElement.style.margin = '0';
   gameCanvasElement.style.transformOrigin = '0 0';
   gameCanvasElement.style.transform = homographyToCssMatrix3d(src, dst);
+
+  // 投影ウィンドウを開いている間は、キーストーン調整をそちらへも反映する
+  if (projectionWindow && !projectionWindow.closed) {
+    layoutProjectionCanvas();
+  }
 }
 
 // --- ホモグラフィー(射影変換)の計算 --------------------------------
@@ -1514,6 +1519,11 @@ function projectPoint(H, p) {
 
 let screenDetailsObj = null; // getScreenDetails() の結果(ライブに更新される)
 
+// 投影ウィンドウ(プロジェクタ側)関連。null = 投影していない。
+let projectionWindow = null;       // window.open で開いた別ウィンドウ
+let projectionMirrorCanvas = null; // 投影ウィンドウ内のミラー用canvas
+let projectionMirrorRAF = null;    // ミラー転写ループのrequestAnimationFrame ID
+
 function setupProjection() {
   const supported = 'getScreenDetails' in window;
   document.getElementById('refreshMonitorsBtn').addEventListener('click', refreshMonitors);
@@ -1527,6 +1537,11 @@ function setupProjection() {
   } else {
     status.textContent = '「モニター一覧を更新」で投影先を選べます';
   }
+
+  // メインウィンドウを閉じたら投影ウィンドウも閉じる(取り残し防止)
+  window.addEventListener('beforeunload', () => {
+    if (projectionWindow && !projectionWindow.closed) projectionWindow.close();
+  });
 }
 
 async function refreshMonitors() {
@@ -1570,20 +1585,168 @@ function populateMonitorSelect() {
   }
 }
 
-async function projectToSelectedMonitor() {
+// 「選択モニターに投影」= プロジェクタ側に別ウィンドウを開き、そこへゲーム画面を
+// 毎フレーム転写(ミラー)する。元ウィンドウ(ノートPC)は操作画面のまま残る。
+// もう一度押すと投影を終了する(トグル)。
+function projectToSelectedMonitor() {
   const status = document.getElementById('monitorStatus');
-  const value = document.getElementById('monitorSelect').value;
 
-  try {
-    if (screenDetailsObj && value !== '') {
-      const screen = screenDetailsObj.screens[Number(value)];
-      await gameCanvasElement.requestFullscreen({ screen });
-    } else {
-      // 出力先未指定 or 非対応環境 → 既定モニターへ通常フルスクリーン
-      await gameCanvasElement.requestFullscreen();
-    }
-  } catch (err) {
-    status.textContent = `投影(フルスクリーン)に切り替えられませんでした: ${err.message}`;
+  // すでに投影中ならトグルで停止する
+  if (projectionWindow && !projectionWindow.closed) {
+    stopProjection();
+    return;
   }
+
+  const value = document.getElementById('monitorSelect').value;
+  let features = 'popup=yes';
+  let target = null;
+
+  if (screenDetailsObj && value !== '') {
+    // 選択したモニターの位置・サイズにウィンドウを開く
+    target = screenDetailsObj.screens[Number(value)];
+    features = `popup=yes,left=${target.availLeft},top=${target.availTop},` +
+      `width=${target.availWidth},height=${target.availHeight}`;
+  }
+
+  projectionWindow = window.open('', 'whiteboardProjection', features);
+  if (!projectionWindow) {
+    status.textContent = '投影ウィンドウを開けませんでした(ポップアップを許可してください)';
+    return;
+  }
+
+  // 選択モニターの座標へ確実に移動・最大化する(featuresが効かないブラウザ対策)
+  if (target) {
+    try {
+      projectionWindow.moveTo(target.availLeft, target.availTop);
+      projectionWindow.resizeTo(target.availWidth, target.availHeight);
+    } catch (e) { /* 一部ブラウザは移動/リサイズを禁止するが致命的ではない */ }
+  }
+
+  writeProjectionDocument(projectionWindow);
+  projectionMirrorCanvas = projectionWindow.document.getElementById('mirror');
+
+  // 投影ウィンドウ内でクリックすると全画面化(ブラウザのUIを消す)。
+  // 全画面化はそのウィンドウ内のユーザー操作が必要なので、ここでは自動化せず案内する。
+  projectionWindow.document.addEventListener('click', () => {
+    const el = projectionWindow.document.documentElement;
+    if (projectionWindow.document.fullscreenElement) {
+      projectionWindow.document.exitFullscreen();
+    } else if (el.requestFullscreen) {
+      el.requestFullscreen().catch(() => {});
+    }
+    const hint = projectionWindow.document.getElementById('hint');
+    if (hint) hint.style.display = 'none';
+  });
+  projectionWindow.addEventListener('resize', layoutProjectionCanvas);
+
+  // レイアウト確定を待ってからキーストーン等を適用(開いた直後はinnerWidthが0のことがある)
+  setTimeout(layoutProjectionCanvas, 60);
+
+  startProjectionMirror();
+  updateProjectionButton();
+  status.textContent = target
+    ? `「${target.label || '選択モニター'}」へ投影中(ウィンドウ内クリックで全画面)`
+    : '投影ウィンドウを開きました(プロジェクタ画面へ移動し、クリックで全画面)';
+}
+
+// 投影ウィンドウの中身(黒背景+ミラー用canvas+案内)を書き込む
+function writeProjectionDocument(win) {
+  win.document.open();
+  win.document.write(`<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
+<title>投影出力</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; height: 100%; cursor: none; }
+  #mirror { position: fixed; left: 0; top: 0; transform-origin: 0 0; }
+  #hint {
+    position: fixed; left: 50%; top: 12px; transform: translateX(-50%);
+    color: #888; font: 13px sans-serif; background: rgba(0,0,0,0.6);
+    padding: 6px 14px; border-radius: 6px; z-index: 10; cursor: pointer;
+  }
+</style></head><body>
+  <canvas id="mirror" width="${CANVAS_W}" height="${CANVAS_H}"></canvas>
+  <div id="hint">クリックで全画面 / このウィンドウをプロジェクタ画面へ</div>
+</body></html>`);
+  win.document.close();
+}
+
+// 投影ウィンドウのcanvasを、そのウィンドウのサイズに合わせて配置し、
+// 保存済みのキーストーン補正(なければアスペクト維持で中央寄せ)を適用する。
+function layoutProjectionCanvas() {
+  if (!projectionWindow || projectionWindow.closed || !projectionMirrorCanvas) return;
+
+  const vw = projectionWindow.innerWidth || projectionWindow.document.documentElement.clientWidth;
+  const vh = projectionWindow.innerHeight || projectionWindow.document.documentElement.clientHeight;
+  if (!vw || !vh) return;
+
+  const scale = Math.min(vw / CANVAS_W, vh / CANVAS_H);
+  const dispW = CANVAS_W * scale;
+  const dispH = CANVAS_H * scale;
+
+  // src = canvas要素ローカル座標(左上原点)の長方形。dst = 投影先の4隅(投影ウィンドウのpx)。
+  const src = [
+    { x: 0, y: 0 },
+    { x: dispW, y: 0 },
+    { x: dispW, y: dispH },
+    { x: 0, y: dispH },
+  ];
+
+  let dst;
+  if (projectorCornerFractions) {
+    // 保存済みキーストーン: 4隅の割合を投影ウィンドウのサイズへ写す
+    dst = projectorCornerFractions.map((c) => ({ x: c.fx * vw, y: c.fy * vh }));
+  } else {
+    // 未調整: アスペクト維持で中央寄せ(=歪みなし)
+    const ox = (vw - dispW) / 2;
+    const oy = (vh - dispH) / 2;
+    dst = [
+      { x: ox, y: oy },
+      { x: ox + dispW, y: oy },
+      { x: ox + dispW, y: oy + dispH },
+      { x: ox, y: oy + dispH },
+    ];
+  }
+
+  projectionMirrorCanvas.style.width = `${dispW}px`;
+  projectionMirrorCanvas.style.height = `${dispH}px`;
+  projectionMirrorCanvas.style.transform = homographyToCssMatrix3d(src, dst);
+}
+
+// ゲームキャンバスの内容を投影ウィンドウのcanvasへ毎フレーム転写するループ
+function startProjectionMirror() {
+  const tick = () => {
+    if (!projectionWindow || projectionWindow.closed) {
+      stopProjection(); // ユーザーが投影ウィンドウを閉じたら停止して状態を戻す
+      return;
+    }
+    if (projectionMirrorCanvas && gameCanvasElement) {
+      const ctx = projectionMirrorCanvas.getContext('2d');
+      ctx.drawImage(gameCanvasElement, 0, 0, CANVAS_W, CANVAS_H);
+    }
+    projectionMirrorRAF = requestAnimationFrame(tick);
+  };
+  projectionMirrorRAF = requestAnimationFrame(tick);
+}
+
+function stopProjection() {
+  if (projectionMirrorRAF) {
+    cancelAnimationFrame(projectionMirrorRAF);
+    projectionMirrorRAF = null;
+  }
+  if (projectionWindow && !projectionWindow.closed) {
+    projectionWindow.close();
+  }
+  projectionWindow = null;
+  projectionMirrorCanvas = null;
+  updateProjectionButton();
+  const status = document.getElementById('monitorStatus');
+  if (status) status.textContent = '投影を終了しました';
+}
+
+// 投影中かどうかでボタンの文言を切り替える
+function updateProjectionButton() {
+  const btn = document.getElementById('projectFullscreenBtn');
+  if (!btn) return;
+  const active = !!(projectionWindow && !projectionWindow.closed);
+  btn.textContent = active ? '投影を終了' : '選択モニターに投影';
 }
 
