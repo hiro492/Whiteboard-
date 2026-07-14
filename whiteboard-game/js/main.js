@@ -20,6 +20,7 @@ function setup() {
   init_physics();
 
   document.getElementById('clearBtn').addEventListener('click', clear_all);
+  init_sound();
   init_fullscreen();
   init_calibration();
   init_projection();
@@ -33,9 +34,10 @@ function setup() {
   }
 }
 
-// p5.jsの毎フレームコールバック: 物理を進めて描画する
+// p5.jsの毎フレームコールバック: 物理を進めて、音を鳴らして、描画する
 function draw() {
   update_physics();
+  run_contact_sound();
 
   background(30);
 
@@ -66,6 +68,15 @@ function run_detection(Img) {
   rebuild_image_terrain(Result.Polygons);
   set_contour_debug(Result.Polygons);
   show_detection_count(Result.AcceptedCount);
+}
+
+// 効果音の統括: 接触の素データ(物理)→ 変換(衝突音か転がり音かの判定)→ 出力(WebAudio)を
+// 引数と戻り値だけで繋ぐ(run_detection と同じ形)。毎フレーム draw から呼ばれる。
+function run_contact_sound() {
+  const Contacts = collect_ball_contacts();
+  const Events = evaluate_contact_sounds(Contacts);
+
+  play_contact_sounds(Events);
 }
 
 // 全消去の統括: 物理ボディ・デバッグ表示・検出メモリをまとめて初期化する

@@ -5,22 +5,36 @@
 // 他モジュールとは点列や座標の引数・戻り値だけで連携する(データ結合)。
 // =====================================================================
 
-const { Engine, World, Bodies } = Matter;
+const { Engine, World, Bodies, Events } = Matter;
 
 let PhysicsEngine = null;
 let PhysicsWorld = null;
 let HandLines = [];  // マウスドラッグで描いた線(静的ボディ)
 let ImageLines = []; // 画像検出で生成した線(静的ボディ、検出のたびに作り直す)
 let Balls = [];      // 落としたボール
+let FrameContacts = []; // 今フレームに接触していたペア(update_physicsのたびに作り直す)
 
 function init_physics() {
   PhysicsEngine = Engine.create();
   PhysicsWorld = PhysicsEngine.world;
+
+  // 「今フレーム触れている全ペア」は両イベントの和になる:
+  // 新規に触れたペアは collisionStart にしか、触れ続けているペアは collisionActive にしか現れない
+  Events.on(PhysicsEngine, 'collisionStart', record_frame_contacts);
+  Events.on(PhysicsEngine, 'collisionActive', record_frame_contacts);
 }
 
 // 物理演算を1ステップ進める(毎フレーム呼ばれる)
 function update_physics() {
-  Engine.update(PhysicsEngine);
+  FrameContacts = [];
+  Engine.update(PhysicsEngine); // この中で上の2イベントが同期的に発火する
+}
+
+// 発火した衝突ペアを記録するだけ(衝突か転がりかの判定は変換側 transform/contact.js の仕事)
+function record_frame_contacts(Event) {
+  for (const Pair of Event.pairs) {
+    FrameContacts.push(Pair);
+  }
 }
 
 // 描画側(output_render)へボディ一覧を渡すためのアクセサ
@@ -94,6 +108,55 @@ function clear_physics() {
   HandLines = [];
   ImageLines = [];
   Balls = [];
+}
+
+// ワールドには静的な線と動的なボールしかいないので、動的なら必ずボール
+function is_ball_body(Body) {
+  return !Body.isStatic;
+}
+
+// 今フレームの接触ペアを「ボールID → 接触面の法線」の対応表にする。
+// 1つのボールが複数セグメントに同時接触した場合は最初の法線を使う(隣接セグメントの法線はほぼ同一)。
+// 戻り値: { StaticHits: Map(BallId → {NormalX, NormalY}), BallPairs: [{IdA, IdB, NormalX, NormalY}] }
+function build_contact_map() {
+  const StaticHits = new Map();
+  const BallPairs = [];
+
+  for (const Pair of FrameContacts) {
+    const { bodyA, bodyB, collision } = Pair;
+    const Normal = { NormalX: collision.normal.x, NormalY: collision.normal.y };
+    const IsBallA = is_ball_body(bodyA);
+    const IsBallB = is_ball_body(bodyB);
+
+    if (IsBallA && IsBallB) {
+      BallPairs.push({ IdA: bodyA.id, IdB: bodyB.id, ...Normal });
+    } else if (IsBallA && !StaticHits.has(bodyA.id)) {
+      StaticHits.set(bodyA.id, Normal);
+    } else if (IsBallB && !StaticHits.has(bodyB.id)) {
+      StaticHits.set(bodyB.id, Normal);
+    }
+  }
+  return { StaticHits, BallPairs };
+}
+
+// 今フレームの接触を「ボール1個 = 1レコード」の素データに整えて返す(効果音の源泉)。
+// 接触していないボールも IsTouching: false のレコードとして含める(前フレームとの遷移判定に必要)。
+// 戻り値: { Balls: [{Id, Vx, Vy, IsTouching, NormalX, NormalY}], BallPairs: [...] }
+function collect_ball_contacts() {
+  const { StaticHits, BallPairs } = build_contact_map();
+
+  const BallRecords = Balls.map((Body) => {
+    const Hit = StaticHits.get(Body.id);
+    return {
+      Id: Body.id,
+      Vx: Body.velocity.x,
+      Vy: Body.velocity.y,
+      IsTouching: Boolean(Hit),
+      NormalX: Hit ? Hit.NormalX : 0,
+      NormalY: Hit ? Hit.NormalY : 0,
+    };
+  });
+  return { Balls: BallRecords, BallPairs };
 }
 
 // 画面外に落ちたボールを削除してメモリを圧迫しないようにする(毎フレーム呼ばれる)

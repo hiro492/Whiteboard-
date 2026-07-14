@@ -201,6 +201,10 @@
     <button id="fullscreenBtn">フルスクリーン</button>
     <button id="calibrateBtn">プロジェクタ調整</button>
   </div>
+  <div class="row">
+    <label><input type="checkbox" id="soundToggle" checked> 効果音</label>
+    <label>音量: <input type="range" id="soundVolumeSlider" min="0" max="100" value="60"> <span id="soundVolumeValue">60</span></label>
+  </div>
   <div class="row" id="projectionControls">
     投影出力:
     <select id="monitorSelect"><option value="">既定のモニター</option></select>
@@ -317,7 +321,9 @@
 <script src="js/shared_homography.js"></script>
 <script src="js/transform/mask.js"></script>
 <script src="js/transform/detect.js"></script>
+<script src="js/transform/contact.js"></script>
 <script src="js/output/physics.js"></script>
+<script src="js/output/sound.js"></script>
 <script src="js/output/render.js"></script>
 <script src="js/output/status.js"></script>
 <script src="js/output/fullscreen.js"></script>
