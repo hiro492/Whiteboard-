@@ -112,7 +112,7 @@
     transform: translateX(-50%) translateY(0);
     pointer-events: auto;
   }
-  /* プロカム(プロジェクタ)調整オーバーレイ */
+  /* プロジェクタ調整オーバーレイ */
   #calibOverlay {
     position: fixed;
     inset: 0;
@@ -187,16 +187,9 @@
     text-align: center;
     z-index: 3001;
   }
-  /* 自動調整の白黒パターン。カメラで投影領域を検出する間だけ全画面に表示する */
-  #calibPatternOverlay {
-    position: fixed;
-    inset: 0;
-    z-index: 5000;
-    display: none;
-    background: #000;
-  }
-  #calibPatternOverlay.active {
-    display: block;
+  /* カメラ4隅補正のハンドル(プレビュー上に描画するのでcanvas側で処理する) */
+  #roiOverlayCanvas.editing {
+    cursor: grab;
   }
 </style>
 </head>
@@ -206,7 +199,7 @@
   <div class="row">
     <button id="clearBtn">クリア</button>
     <button id="fullscreenBtn">フルスクリーン</button>
-    <button id="calibrateBtn">プロカム調整</button>
+    <button id="calibrateBtn">プロジェクタ調整</button>
   </div>
   <div class="row" id="projectionControls">
     投影出力:
@@ -228,8 +221,9 @@
     <select id="cameraSelect"></select>
     <button id="startCameraBtn">カメラ開始</button>
     <button id="captureCameraBtn" disabled>この映像で地形を作る</button>
-    <button id="clearRoiBtn">ROI解除</button>
-    <p style="font-size:11px;color:#888;margin:2px 0;">プレビュー上をドラッグして検出範囲(ROI)を指定できます</p>
+    <button id="cameraCalibBtn">カメラ4隅を合わせる</button>
+    <button id="cameraCalibResetBtn">カメラ補正リセット</button>
+    <p style="font-size:11px;color:#888;margin:2px 0;">「カメラ4隅を合わせる」を押し、プレビュー上の4隅ハンドルをホワイトボードの角にドラッグすると、斜めからの歪みを長方形に補正します</p>
     <p id="cameraStatus"></p>
     <div>
       <button id="realtimeToggleBtn" disabled>リアルタイム開始</button>
@@ -269,15 +263,14 @@
 
 <button id="fullscreenExitBtn">終了</button>
 
-<!-- プロカム調整オーバーレイ(四隅ドラッグでキーストーン補正) -->
+<!-- プロジェクタ調整オーバーレイ(四隅ドラッグでキーストーン補正) -->
 <div id="calibOverlay">
   <div class="calib-handle" data-corner="0" data-label="左上"></div>
   <div class="calib-handle" data-corner="1" data-label="右上"></div>
   <div class="calib-handle" data-corner="2" data-label="右下"></div>
   <div class="calib-handle" data-corner="3" data-label="左下"></div>
   <div id="calibToolbar">
-    <span>四隅を投影面の角に合わせてドラッグ / またはカメラで自動調整</span>
-    <button id="autoCalibrateBtn">カメラで自動調整</button>
+    <span>四隅を投影面(ホワイトボード)の角に合わせてドラッグしてください</span>
     <button id="calibToggleHandlesBtn">ハンドルを隠す</button>
     <button id="calibResetBtn">リセット</button>
     <button id="calibSaveBtn">保存</button>
@@ -285,13 +278,9 @@
     <span id="calibStatus"></span>
   </div>
   <div id="calibHint">
-    自動調整: 正面からホワイトボードを写すカメラを「カメラ開始」しておき、この画面を投影面に投影した状態で押してください。
-    白黒パターンを一瞬投影し、カメラから見た投影領域を検出して補正します。
+    斜めから投影したときの台形歪みを補正します。四隅ハンドルを投影面の実際の角に合わせ、「保存」で確定してください。
   </div>
 </div>
-
-<!-- 自動調整用の全画面白黒パターン(カメラで投影領域を検出するために一瞬だけ表示する) -->
-<div id="calibPatternOverlay"></div>
 
 <div id="cameraPreviewWrap">
   <video id="cameraPreview" autoplay muted playsinline></video>
@@ -310,8 +299,8 @@
   function onOpenCvReady() {
     cv['onRuntimeInitialized'] = () => {
       window.cvReady = true;
-      if (typeof window.handleCvReady === 'function') {
-        window.handleCvReady();
+      if (typeof window.handle_cv_ready === 'function') {
+        window.handle_cv_ready();
       }
     };
   }
@@ -323,6 +312,21 @@
   onerror="document.getElementById('cvStatus').textContent = 'OpenCV.jsの読み込みに失敗しました(ネットワーク接続を確認してください)';"
 ></script>
 
-<script src="sketch.js"></script>
+<!-- 自作コード: STS分割(config/共通 → 変換 → 出力 → 入力 → main)の順に読み込む -->
+<script src="js/config.js"></script>
+<script src="js/shared_homography.js"></script>
+<script src="js/transform_mask.js"></script>
+<script src="js/transform_detect.js"></script>
+<script src="js/output_physics.js"></script>
+<script src="js/output_render.js"></script>
+<script src="js/output_status.js"></script>
+<script src="js/output_fullscreen.js"></script>
+<script src="js/output_projector.js"></script>
+<script src="js/output_projection.js"></script>
+<script src="js/input_mouse.js"></script>
+<script src="js/input_image.js"></script>
+<script src="js/input_camera.js"></script>
+<script src="js/input_camera_calib.js"></script>
+<script src="js/main.js"></script>
 </body>
 </html>
