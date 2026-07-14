@@ -28,8 +28,10 @@ whiteboard-game/js/
   transform/                      【変換(中心変換)】
     mask.js                       … マスク生成(HSV/適応的二値化)・モルフォロジー
     detect.js                     … detect_polygons(純変換の統括)・差分判定(PreviousMask所有)
+    contact.js                    … 効果音の判定(衝突音か転がり音か。前フレームの接触状態を所有)
   output/                         【出力(吸収)】
-    physics.js                    … matter.jsボディの生成/削除(HandLines/ImageLines/Ballsを所有)
+    physics.js                    … matter.jsボディの生成/削除(HandLines/ImageLines/Ballsを所有)・接触の素データ取り出し
+    sound.js                      … 効果音(WebAudioで合成。衝突音と転がり音)
     render.js                     … p5描画(線・ボール・輪郭デバッグ)
     status.js                     … DOMラベル・マスクプレビュー表示の吸収点
     fullscreen.js                 … フルスクリーン
@@ -66,6 +68,28 @@ run_detection(Img)
 変換の内部: `GaussianBlur` → マスク生成(`Params.Method` で選ぶ **HSV黒ペンマスク** `build_black_pen_mask` または**適応的二値化** `build_adaptive_threshold_mask`) → モルフォロジー処理 `apply_morphology`(OPEN/dilate/CLOSE) → `PreviousMask` との**差分チェック**(`evaluate_mask_change`: しきい値未満の画素しか変化していなければ `ShouldUpdate=false` を返し地形の再構築をスキップ — これによりリアルタイムのカメラモードが軽量になる) → `findContours` → `approxPolyDP`(`contour_to_points`) → ポリゴン点列。画像の縁に接する輪郭(`touches_image_edge`)はフレームの映り込みとして破棄される。
 
 検出した輪郭はキャンバスに収まるよう拡大縮小・中央寄せされる。変換パラメータは `compute_fit_transform` が毎回計算し直す。
+
+### 効果音のデータフロー(衝突音と転がり音を重複させない設計)
+
+毎フレーム `main.js` の `run_contact_sound()` が、検出と同じく「入力→変換→出力」を**引数と戻り値だけで**繋ぐ:
+
+```
+run_contact_sound()
+  ├ Contacts = collect_ball_contacts()          [源泉: output/physics.js — matter.jsの接触ペアを平たい素データにするだけ]
+  │    Contacts = { Balls: [{Id, Vx, Vy, IsTouching, NormalX, NormalY}], BallPairs: [...] }
+  ├ Events = evaluate_contact_sounds(Contacts)  [変換: transform/contact.js。純関数。matter.js/DOM/WebAudioに触れない]
+  │    Events = { Impacts: [{Strength: 0〜1, IsBallHit}], RollLevel: 0〜1 }
+  └ play_contact_sounds(Events)                 [出力: output/sound.js。0〜1の数値しか知らない]
+```
+
+**重複しない理由(この機能の核心)**: 線は1本の連続した線ではなく、`add_line_segment` が作った独立ボディが数十個連なったものである。そのため「新しい接触ペアができたら衝突音」とすると、転がっているだけのボールがセグメントを跨ぐたびに衝突音が連射される。そこで判定を**ペア単位ではなくボール単位の状態遷移**で行う:
+
+- **衝突音** = ボールが「どの静的ボディにも触れていない → 何かに触れた」と**遷移したフレームだけ**。転がり中はセグメントを乗り継いでも接触が途切れないので遷移が起きず、鳴りようがない
+- **転がり音** = 接触が**継続している**ボールの、面に沿った速度(接線成分 = 速度と法線の外積)だけ。衝突したフレームは接触が継続していないので寄与しない
+
+同じ1つの状態機械の相互排他な2つの枝なので、構造的に重複しない。衝突の強さは**前フレームの速度**を法線へ射影して求める(`Engine.update` 後の速度は跳ね返りが解決済みで、接近の勢いを過小評価するため)。
+
+WebAudio の AudioContext は**最初のユーザー操作まで作れない**(ブラウザが操作前の再生を禁止している)ため、sound.js は `window` に一度きりの `pointerdown`/`keydown` リスナーを張って遅延生成する。転がり音は全ボール共通の1ボイスで、音源は鳴らしっぱなしにしてゲインだけを動かす(start/stop を繰り返すとプチノイズが出る)。
 
 ### 重要: OpenCV Mat のメモリ管理
 
